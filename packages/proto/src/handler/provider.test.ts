@@ -1,5 +1,6 @@
 import { badRequestError, ServiceError } from '@lowerdeck/error';
 import { describe, expect, it } from 'vitest';
+import { buildApiServiceError } from '../../../provider/src/error/api';
 import { SlateError } from '../../../provider/src/error/base';
 import {
   createSlatesProviderProtoHandler,
@@ -85,6 +86,50 @@ describe('SlatesProviderProtoHandlerManager', () => {
             code: 'bad_request',
             status: 400
           }
+        }
+      }
+    });
+  });
+
+  // What createAxios rejects with for an upstream 503 or 429.
+  let upstreamError = (code: string, status: number) =>
+    new SlateError({ code, message: `Upstream returned ${status}`, upstream: { status } });
+
+  it.each([
+    ['upstream.unavailable', 503, {}],
+    ['upstream.rate_limited', 429, {}],
+    // Callers that drop the parent still record the upstream status.
+    ['upstream.unavailable', 503, { parent: {} }],
+    ['upstream.rate_limited', 429, { parent: {} }]
+  ])('keeps %s for a wrapped upstream %i %j', async (code, status, options) => {
+    let manager = await createSlatesProviderProtoHandler(async manager => {
+      manager.onRequest('slates/provider.identify', async () => {
+        throw buildApiServiceError(upstreamError(code, status), {
+          providerLabel: 'Example',
+          operation: 'list widgets',
+          reason: 'example_api_error',
+          ...options
+        });
+      });
+    }).run();
+
+    let response = await SlatesProviderProtoHandlerManager.handleInput(manager, {
+      jsonrpc: '2.0',
+      id: 'req_wrapped',
+      method: 'slates/provider.identify',
+      params: {}
+    });
+
+    expect(response).toMatchObject({
+      error: {
+        code,
+        kind: 'upstream',
+        message: `Example API list widgets failed: HTTP ${status}: Upstream returned ${status}`,
+        retryable: true,
+        status,
+        upstream: { status },
+        baggage: {
+          serviceError: { code: 'bad_request', reason: 'example_api_error' }
         }
       }
     });

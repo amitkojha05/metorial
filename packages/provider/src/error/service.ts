@@ -1,10 +1,16 @@
 import type { ErrorData, ErrorRecord, ServiceError } from '@lowerdeck/error';
 import { isServiceError } from '@lowerdeck/error';
 import { DEFAULT_CODE, SERVICE_ERROR_CODE_MAP } from './defaults';
-import type { SlateErrorInput, SlateErrorIssue, SlateServiceErrorData } from './types';
+import type {
+  SlateErrorInput,
+  SlateErrorIssue,
+  SlateErrorResponse,
+  SlateServiceErrorData
+} from './types';
 import {
   cleanRecord,
   isRecord,
+  isSlateErrorResponse,
   normalizeKind,
   normalizeRetryable,
   sanitizeForBaggage
@@ -91,6 +97,55 @@ let getServiceErrorBaggage = (data: SlateServiceErrorData) => {
   });
 };
 
+// Mirrors the status table createAxios uses (error/axios.ts). Statuses it has no specific
+// code for return undefined, so the wrapper keeps its own classification.
+let mapUpstreamStatusCode = (status: number) => {
+  if (status === 401) return 'auth.invalid';
+  if (status === 403) return 'permission.denied';
+  if (status === 404) return 'resource.not_found';
+  if (status === 408) return 'upstream.timeout';
+  if (status === 409) return 'resource.conflict';
+  if (status === 400 || status === 422) return 'upstream.invalid_request';
+  if (status === 429) return 'upstream.rate_limited';
+  if (status === 502 || status === 503 || status === 504) return 'upstream.unavailable';
+  if (status >= 500 && status <= 599) return 'upstream.error';
+  return undefined;
+};
+
+// buildApiServiceError wraps every upstream failure in a bad_request ServiceError, so that
+// code says nothing about the upstream. The classification survives on the SlateError it
+// wraps (its parent), or as the upstreamStatus it recorded when the caller dropped the parent.
+let getWrappedUpstreamError = (
+  error: unknown,
+  data: SlateServiceErrorData
+): Partial<SlateErrorResponse> | null => {
+  if (data.code !== 'bad_request') return null;
+
+  let parent = isStructuredValue(error) && 'parent' in error ? error.parent : undefined;
+  if (
+    isStructuredValue(parent) &&
+    typeof parent.name === 'string' &&
+    parent.name.startsWith('SlateError') &&
+    'data' in parent &&
+    isSlateErrorResponse(parent.data)
+  ) {
+    return parent.data;
+  }
+
+  let status = Number(data.upstreamStatus);
+  let code = Number.isInteger(status) ? mapUpstreamStatusCode(status) : undefined;
+  if (!code) return null;
+
+  return {
+    code,
+    status,
+    upstream: cleanRecord({
+      status,
+      code: typeof data.upstreamCode === 'string' ? data.upstreamCode : undefined
+    })
+  };
+};
+
 export let mapServiceErrorCode = (code: string, status?: number) =>
   SERVICE_ERROR_CODE_MAP[code] ?? mapServiceErrorCodeByStatus(status);
 
@@ -151,20 +206,23 @@ export let mapServiceErrorToSlateErrorInput = (
     };
   }
 
-  let code = defaults.code ?? mapServiceErrorCode(data.code, data.status);
+  let wrapped = defaults.code === undefined ? getWrappedUpstreamError(error, data) : null;
+  let code = defaults.code ?? wrapped?.code ?? mapServiceErrorCode(data.code, data.status);
 
   return {
     code,
     message: defaults.message ?? data.message,
-    kind: defaults.kind ?? normalizeKind(code),
-    retryable: defaults.retryable ?? normalizeRetryable(code),
-    status: defaults.status ?? data.status,
+    kind: defaults.kind ?? wrapped?.kind ?? normalizeKind(code),
+    retryable: defaults.retryable ?? wrapped?.retryable ?? normalizeRetryable(code),
+    status: defaults.status ?? (wrapped ? wrapped.status : data.status),
     issues: defaults.issues ?? normalizeServiceErrorIssues(data.errors),
-    provider: defaults.provider,
-    upstream: defaults.upstream,
+    provider: defaults.provider ?? wrapped?.provider,
+    upstream: defaults.upstream ?? wrapped?.upstream,
     baggage: cleanRecord({
+      ...(wrapped?.baggage ?? {}),
       ...(defaults.baggage ?? {}),
       ...getServiceErrorBaggage(data)
-    })
+    }),
+    requestTraces: wrapped?.requestTraces
   };
 };

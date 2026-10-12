@@ -169,7 +169,17 @@ let toSlateErrorResponse = (
 
   let serviceError = getServiceErrorData(error);
   if (serviceError) {
-    return mapServiceErrorToSlateErrorResponse(serviceError, defaults);
+    let response = mapServiceErrorToSlateErrorResponse(serviceError, defaults);
+    let wrapped = defaults.code ? null : getWrappedUpstreamError(error, serviceError);
+    if (!wrapped) return response;
+
+    // The wrapper's message and baggage, the wrapped failure's classification.
+    return {
+      ...wrapped,
+      message: response.message,
+      ...(response.issues ? { issues: response.issues } : {}),
+      baggage: { ...(isRecord(wrapped.baggage) ? wrapped.baggage : {}), ...response.baggage }
+    };
   }
 
   return mapUnknownErrorToSlateErrorResponse(error, defaults);
@@ -295,6 +305,50 @@ let mapRetryable = (code: string) =>
   code === 'upstream.error' ||
   code === 'transport.invoke_failed' ||
   code === 'internal.timeout';
+
+// Mirrors the status table createAxios uses (provider error/axios.ts). Statuses it has no
+// specific code for return undefined, so the wrapper keeps its own classification.
+let mapUpstreamStatusCode = (status: number) => {
+  if (status === 401) return 'auth.invalid';
+  if (status === 403) return 'permission.denied';
+  if (status === 404) return 'resource.not_found';
+  if (status === 408) return 'upstream.timeout';
+  if (status === 409) return 'resource.conflict';
+  if (status === 400 || status === 422) return 'upstream.invalid_request';
+  if (status === 429) return 'upstream.rate_limited';
+  if (status === 502 || status === 503 || status === 504) return 'upstream.unavailable';
+  if (status >= 500 && status <= 599) return 'upstream.error';
+  return undefined;
+};
+
+// buildApiServiceError wraps every upstream failure in a bad_request ServiceError, so that
+// code says nothing about the upstream. The classification survives on the SlateError it
+// wraps (its parent), or as the upstreamStatus it recorded when the caller dropped the parent.
+let getWrappedUpstreamError = (
+  error: unknown,
+  data: { code: string; [key: string]: unknown }
+): { code: string; [key: string]: unknown } | null => {
+  if (data.code !== 'bad_request') return null;
+
+  let parent =
+    isStructuredValue(error) && 'parent' in error ? getSlateErrorResponse(error.parent) : null;
+  if (parent) return parent;
+
+  let status = Number(data.upstreamStatus);
+  let code = Number.isInteger(status) ? mapUpstreamStatusCode(status) : undefined;
+  if (!code) return null;
+
+  return {
+    code,
+    kind: mapKind(code),
+    retryable: mapRetryable(code),
+    status,
+    upstream: {
+      status,
+      ...(typeof data.upstreamCode === 'string' ? { code: data.upstreamCode } : {})
+    }
+  };
+};
 
 let mapServiceErrorCode = (code: string, status?: number) => {
   if (SERVICE_ERROR_CODE_MAP[code]) return SERVICE_ERROR_CODE_MAP[code];

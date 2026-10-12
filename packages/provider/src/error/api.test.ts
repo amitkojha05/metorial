@@ -111,4 +111,64 @@ describe('API service error helpers', () => {
       })
     ).toBe(existing);
   });
+
+  it('keeps the classification of the upstream failure it wraps', () => {
+    // What createAxios rejects with for an upstream 503.
+    let parent = new SlateError({
+      code: 'upstream.unavailable',
+      message: 'Service Unavailable',
+      upstream: { status: 503 }
+    });
+
+    let error = SlateError.fromUnknown(
+      buildApiServiceError(parent, {
+        providerLabel: 'Example',
+        operation: 'list widgets',
+        reason: 'example_api_error'
+      })
+    );
+
+    expect(error.toResponse()).toMatchObject({
+      code: 'upstream.unavailable',
+      kind: 'upstream',
+      message: 'Example API list widgets failed: HTTP 503: Service Unavailable',
+      retryable: true,
+      status: 503,
+      upstream: { status: 503 }
+    });
+  });
+
+  it('classifies by upstream status when the caller drops the parent', () => {
+    let parent = new SlateError({
+      code: 'upstream.rate_limited',
+      message: 'Too Many Requests',
+      upstream: { status: 429 }
+    });
+
+    let error = SlateError.fromUnknown(
+      buildApiServiceError(parent, {
+        providerLabel: 'Example',
+        reason: 'example_api_error',
+        parent: {},
+        extractUpstreamCode: () => 'RATE_LIMITED'
+      })
+    );
+
+    expect(error.toResponse()).toMatchObject({
+      code: 'upstream.rate_limited',
+      retryable: true,
+      status: 429,
+      upstream: { status: 429, code: 'RATE_LIMITED' }
+    });
+  });
+
+  it('keeps request.bad for errors that carry no upstream failure', () => {
+    let error = SlateError.fromUnknown(
+      createApiServiceError('Owner is required.', { reason: 'example_validation' })
+    );
+
+    expect(error.code).toBe('request.bad');
+    expect(error.retryable).toBe(false);
+    expect(error.status).toBe(400);
+  });
 });
