@@ -118,4 +118,37 @@ describe('SlatesProviderProtoHandlerManager', () => {
       }
     });
   });
+
+  it.each([
+    [new Error('tagId is required for delete'), 'tagId is required for delete'],
+    [new TypeError('Cannot read properties of undefined'), 'Internal server error']
+  ])('reports a thrown %s as "%s"', async (thrown, message) => {
+    let manager = await createSlatesProviderProtoHandler(async manager => {
+      manager.onRequest('slates/provider.identify', async () => {
+        throw thrown;
+      });
+    }).run();
+
+    let response = await SlatesProviderProtoHandlerManager.handleInput(manager, {
+      jsonrpc: '2.0',
+      id: 'req_4',
+      method: 'slates/provider.identify',
+      params: {}
+    });
+
+    expect(response).toEqual({
+      jsonrpc: '2.0',
+      id: 'req_4',
+      error: {
+        code: 'internal.unexpected',
+        kind: 'internal',
+        message,
+        retryable: false,
+        status: 500,
+        baggage: {
+          originalName: thrown.name
+        }
+      }
+    });
+  });
 });

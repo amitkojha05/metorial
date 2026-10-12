@@ -382,6 +382,14 @@ let mapServiceErrorToSlateErrorResponse = (
   };
 };
 
+// A plain Error is how handler code reports a problem on purpose ("tagId is required for
+// delete"), so the caller needs its message. Runtime faults (TypeError, RangeError, ...) keep
+// the generic message.
+let getDeliberateErrorMessage = (error: unknown) =>
+  error instanceof Error && error.name === 'Error' && error.message.trim()
+    ? error.message
+    : undefined;
+
 let mapUnknownErrorToSlateErrorResponse = (
   error: unknown,
   defaults: Partial<{ code: string; message: string }> = {}
@@ -389,6 +397,7 @@ let mapUnknownErrorToSlateErrorResponse = (
   code: defaults.code ?? 'internal.unexpected',
   kind: 'internal',
   message:
+    getDeliberateErrorMessage(error) ??
     defaults.message ??
     (error instanceof Error ? error.message : 'An unexpected internal error occurred.'),
   retryable: false,

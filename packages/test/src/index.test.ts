@@ -627,7 +627,12 @@ describe('@slates/test', () => {
         client.invokeTool('fail', {
           reason: 'intentional failure'
         }),
-      { code: 'internal.unexpected', kind: 'internal', status: 500 }
+      {
+        code: 'internal.unexpected',
+        kind: 'internal',
+        message: 'intentional failure',
+        status: 500
+      }
     );
   });
 
